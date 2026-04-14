@@ -385,13 +385,22 @@ function loadOvEmbed(url,src,title,date,desc,totalLen,curIdx,navFn){
   document.getElementById('news-ov-n').disabled=curIdx===totalLen-1;
   document.getElementById('news-ov-p').onclick=function(e){navFn(-1);e.stopPropagation();};
   document.getElementById('news-ov-n').onclick=function(e){navFn(1);e.stopPropagation();};
-  var timer=setTimeout(function(){showPv();},5000);
-  f.onload=function(){
-    clearTimeout(timer);
-    try{var loc=f.contentWindow.location.href;if(loc==='about:blank'){showPv();}else{showIf();}}
-    catch(e){showIf();}
-  };
-  f.src=url;
+  if(embed){
+    var timer=setTimeout(function(){showPv();},4000);
+    f.onload=function(){
+      clearTimeout(timer);
+      try{var loc=f.contentWindow.location.href;if(!loc||loc==='about:blank'){showPv();}else{showIf();}}
+      catch(e){
+        // SecurityError = cross-origin content loaded (success)
+        // But chrome-error:// also throws — detect by checking if naturalWidth trick works
+        try{if(f.contentDocument&&f.contentDocument.body&&f.contentDocument.body.innerHTML===''){showPv();}else{showIf();}}
+        catch(e2){showIf();}
+      }
+    };
+    f.src=url;
+  } else {
+    ld.classList.add('hide');f.style.display='none';pv.style.display='flex';
+  }
   function showIf(){ld.classList.add('hide');f.style.display='block';pv.style.display='none';}
   function showPv(){ld.classList.add('hide');f.style.display='none';pv.style.display='flex';f.src='about:blank';}
 }
@@ -399,7 +408,7 @@ function openNews(i){
   newsIdx=i;var a=NEWS[i];
   var ov=document.getElementById('news-ov');
   ov._mode='news';
-  loadOvEmbed(a.u,a.s,a.t,a.d,a.e,NEWS.length,i,navNews);
+  loadOvEmbed(a.u,a.s,a.t,a.d,a.e,NEWS.length,i,navNews,a.em||false);
   ov.classList.add('open');document.body.style.overflow='hidden';
 }
 function closeNews(){
@@ -428,7 +437,7 @@ var AWARDS=[
   {s:"Europa y Latinoamérica",d:"2025",
    t:"50+1 Inspiradores de Europa y Latinoamérica",
    e:"Curro Rodríguez reconocido como uno de los 50+1 líderes más inspiradores de Europa y Latinoamérica por su impacto económico, social y su capacidad de liderazgo al frente de Ly Company Group y Ly Holding Capital.",
-   u:"https://www.tribunadeandalucia.es/el-malagueno-curro-rodriguez-fundador-de-ly-company-group-y-ly-holding-capital-reconocido-como-uno-de-los-501-inspiradores-de-europa-y-latinoamerica/"}
+   u:"https://www.tribunadeandalucia.es/el-malagueno-curro-rodriguez-fundador-de-ly-company-group-y-ly-holding-capital-reconocido-como-uno-de-los-501-inspiradores-de-europa-y-latinoamerica/",em:1}
 ];
 var awardIdx=0;
 function openAward(i){
@@ -436,7 +445,7 @@ function openAward(i){
   var a=AWARDS[i];
   var ov=document.getElementById('news-ov');
   ov._mode='award';
-  loadOvEmbed(a.u,a.s,a.t,a.d,a.e,AWARDS.length,i,navAward);
+  loadOvEmbed(a.u,a.s,a.t,a.d,a.e,AWARDS.length,i,navAward,a.em||false);
   ov.classList.add('open');
   document.body.style.overflow='hidden';
 }
