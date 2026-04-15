@@ -7,14 +7,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Deploy via SFTP to IONOS
+      - name: Deploy via FTPS to IONOS
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.IONOS_FTP_HOST }}
           username: ${{ secrets.IONOS_FTP_USER }}
           password: ${{ secrets.IONOS_FTP_PASS }}
-          protocol: sftp
-          port: 22
+          protocol: ftps
           local-dir: ./
           server-dir: ${{ secrets.IONOS_FTP_PATH }}
           exclude: |
