@@ -7,18 +7,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install sshpass
-        run: sudo apt-get install -y sshpass
-      - name: Deploy to IONOS via SFTP
+      - name: Install lftp
+        run: sudo apt-get install -y lftp
+      - name: Deploy all files to IONOS via SFTP
         env:
-          SSHPASS: ${{ secrets.IONOS_FTP_PASS }}
-          FTP_USER: ${{ secrets.IONOS_FTP_USER }}
-          FTP_HOST: ${{ secrets.IONOS_FTP_HOST }}
-          FTP_PATH: ${{ secrets.IONOS_FTP_PATH }}
+          LFTP_PASSWORD: ${{ secrets.IONOS_FTP_PASS }}
         run: |
-          sshpass -e sftp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -P 22 "${FTP_USER}@${FTP_HOST}" <<EOF
-          cd ${FTP_PATH}
-          put index.html
-          bye
-          EOF
+          lftp -u "${{ secrets.IONOS_FTP_USER }},${LFTP_PASSWORD}" \
+            "sftp://${{ secrets.IONOS_FTP_HOST }}:22" \
+            -e "set sftp:auto-confirm yes; set net:timeout 30; \
+                mirror -R --delete \
+                --exclude=\.git/ --exclude=\.github/ --exclude=scripts/ \
+                . ${{ secrets.IONOS_FTP_PATH }}; bye"
