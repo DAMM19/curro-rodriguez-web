@@ -9,7 +9,7 @@ import json
 import sys
 from datetime import datetime
 from urllib.request import urlopen, Request
-from urllib.error import URLError
+from urllib.error import URLError, HTTPError
 from html import unescape
 try:
     from html.parser import HTMLParser
@@ -17,9 +17,9 @@ except ImportError:
     from HTMLParser import HTMLParser
 
 # ── Configuración ──────────────────────────────────────────────────────────────
-AUTHOR_URL  = 'https://www.tribunadeandalucia.es/nueva-economia/curro-rodriguez/'
-SEARCH_URL  = 'https://www.tribunadeandalucia.es/nueva-economia/curro-rodriguez/'
-HTML_PATH   = 'index.html'
+AUTHOR_URL = 'https://www.tribunadeandalucia.es/nueva-economia/curro-rodriguez/'
+SEARCH_URL = 'https://www.tribunadeandalucia.es/nueva-economia/curro-rodriguez/'
+HTML_PATH  = 'index.html'
 
 MESES = {
     'enero':'Ene','febrero':'Feb','marzo':'Mar','abril':'Abr',
@@ -29,20 +29,45 @@ MESES = {
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def fetch_url(url):
-    """Fetches a URL and returns HTML content."""
+    """Fetches a URL and returns HTML content.
+
+    Lanza SystemExit(1) ante cualquier fallo de red o respuesta no-200, en lugar
+    de devolver None silenciosamente. Así el workflow se marca en rojo cuando
+    Tribuna bloquea al bot o cambia la página, y nos enteramos.
+    """
     req = Request(url, headers={
-        'User-Agent': 'Mozilla/5.0 (compatible; diariobot/1.0)',
-        'Accept-Language': 'es-ES,es;q=0.9',
+        # User-Agent realista de navegador. Tribuna (Cloudflare) devuelve 403
+        # al UA "diariobot/1.0" y deja pasar a un Chrome normal.
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/124.0.0.0 Safari/537.36'
+        ),
+        'Accept': (
+            'text/html,application/xhtml+xml,application/xml;q=0.9,'
+            'image/avif,image/webp,*/*;q=0.8'
+        ),
+        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'identity',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
     })
     try:
-        with urlopen(req, timeout=15) as resp:
+        with urlopen(req, timeout=20) as resp:
+            status = getattr(resp, 'status', 200)
+            if status != 200:
+                print(f"  ❌ Respuesta HTTP {status} al pedir {url}")
+                sys.exit(1)
             return resp.read().decode('utf-8', errors='replace')
+    except HTTPError as e:
+        print(f"  ❌ HTTPError {e.code} al pedir {url}: {e.reason}")
+        sys.exit(1)
     except URLError as e:
-        print(f"  Error fetching {url}: {e}")
-        return None
-    except Exception:
-        return None
-
+        print(f"  ❌ URLError al pedir {url}: {e.reason}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"  ❌ Excepción inesperada al pedir {url}: {e}")
+        sys.exit(1)
 
 def parse_tribuna_articles(html):
     """Extracts articles from Tribuna de Andalucía HTML.
@@ -105,7 +130,6 @@ def parse_tribuna_articles(html):
 
     return articles
 
-
 def extract_diario_array(html):
     """Extracts the DIARIO JS array from the HTML."""
     match = re.search(r'var DIARIO=(\[.*?\]);', html, re.DOTALL)
@@ -116,12 +140,10 @@ def extract_diario_array(html):
     raw = re.sub(r'(?<=[{,])(\w+)(?=:)', r'"\1"', raw)
     return json.loads(raw)
 
-
 def build_diario_array(html, items):
     """Replaces the DIARIO array in the HTML."""
     json_str = json.dumps(items, ensure_ascii=False, separators=(',', ':'))
     return re.sub(r'var DIARIO=\[.*?\];', f'var DIARIO={json_str};', html, flags=re.DOTALL)
-
 
 def article_to_diario_item(article):
     """Converts a scraped article to DIARIO array format."""
@@ -135,11 +157,9 @@ def article_to_diario_item(article):
         'e': article.get('excerpt', article['title'])
     }
 
-
 def sort_key(item):
     d = item.get('d', '')
     return d if d else '0000-00-00'
-
 
 def main():
     print("=== Actualización Diario del CEO — Tribuna de Andalucía ===")
@@ -155,16 +175,23 @@ def main():
 
     # Scrape articles
     new_articles = []
+    found_total = 0
     for url in [AUTHOR_URL, SEARCH_URL]:
         print(f"Scrapeando: {url}")
-        page_html = fetch_url(url)
-        if page_html:
-            found = parse_tribuna_articles(page_html)
-            print(f"  Artículos encontrados: {len(found)}")
-            for a in found:
-                if a['url'] not in current_urls and a['url'] not in [x['url'] for x in new_articles]:
-                    new_articles.append(a)
+        page_html = fetch_url(url)   # fetch_url ahora aborta en rojo si falla
+        found = parse_tribuna_articles(page_html)
+        found_total += len(found)
+        print(f"  Artículos encontrados: {len(found)}")
+        for a in found:
+            if a['url'] not in current_urls and a['url'] not in [x['url'] for x in new_articles]:
+                new_articles.append(a)
         break  # Only need one URL since both are the same
+
+    # Si el parser no encuentra NINGÚN artículo en una página que sí existe,
+    # casi seguro es que el HTML cambió o nos están bloqueando. Fallar ruidosamente.
+    if found_total == 0:
+        print("❌ El parser no encontró ningún artículo. La página puede haber cambiado o estar bloqueada.")
+        sys.exit(1)
 
     if not new_articles:
         print("No hay columnas nuevas. No se realizan cambios.")
@@ -185,8 +212,7 @@ def main():
 
     print(f"✅ index.html actualizado con {len(new_items)} columna(s) nueva(s).")
     for a in new_articles:
-        print(f"   + {a['date']} — {a['title']}")
-
+        print(f"  + {a['date']} — {a['title']}")
 
 if __name__ == '__main__':
     main()
