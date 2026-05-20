@@ -3,6 +3,10 @@
 update_diario.py
 Comprueba si Curro Rodríguez ha publicado una nueva columna en Tribuna de Andalucía
 y actualiza el array DIARIO del index.html.
+
+El listado de autor no trae fecha por artículo, así que para cada columna NUEVA
+se visita su propia página y se leen las etiquetas meta (article:published_time,
+og:image, og:description) para rellenar fecha, imagen y resumen correctos.
 """
 import re
 import json
@@ -11,29 +15,24 @@ from datetime import datetime
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from html import unescape
-try:
-    from html.parser import HTMLParser
-except ImportError:
-    from HTMLParser import HTMLParser
 
 # ── Configuración ──────────────────────────────────────────────────────────────
 AUTHOR_URL = 'https://www.tribunadeandalucia.es/nueva-economia/curro-rodriguez/'
-SEARCH_URL = 'https://www.tribunadeandalucia.es/nueva-economia/curro-rodriguez/'
 HTML_PATH  = 'index.html'
 
-MESES = {
-    'enero':'Ene','febrero':'Feb','marzo':'Mar','abril':'Abr',
-    'mayo':'May','junio':'Jun','julio':'Jul','agosto':'Ago',
-    'septiembre':'Sep','octubre':'Oct','noviembre':'Nov','diciembre':'Dic',
-}
+# Imagen por defecto si un artículo no tuviera og:image
+DEFAULT_IMG = 'https://www.tribunadeandalucia.es/wp-content/uploads/2025/07/WhatsApp-Image-2025-07-07-at-17.16.00-e1755524947319.jpg'
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
-def fetch_url(url):
-    """Fetches a URL and returns HTML content.
+MESES_NUM = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
 
-    Lanza SystemExit(1) ante cualquier fallo de red o respuesta no-200, en lugar
-    de devolver None silenciosamente. Así el workflow se marca en rojo cuando
-    Tribuna bloquea al bot o cambia la página, y nos enteramos.
+# ── Helpers de red ──────────────────────────────────────────────────────────────
+def fetch_url(url, fatal=True):
+    """Descarga una URL y devuelve el HTML.
+
+    Con fatal=True (por defecto) aborta el workflow con sys.exit(1) ante cualquier
+    fallo, para que la ejecución salga en ROJO y nos enteremos en vez de pasar
+    como "success" sin hacer nada. Con fatal=False devuelve None (se usa al
+    enriquecer artículos: si una página falla, seguimos con valores por defecto).
     """
     req = Request(url, headers={
         # User-Agent realista de navegador. Tribuna (Cloudflare) devuelve 403
@@ -57,115 +56,126 @@ def fetch_url(url):
             status = getattr(resp, 'status', 200)
             if status != 200:
                 print(f"  ❌ Respuesta HTTP {status} al pedir {url}")
-                sys.exit(1)
+                if fatal:
+                    sys.exit(1)
+                return None
             return resp.read().decode('utf-8', errors='replace')
     except HTTPError as e:
         print(f"  ❌ HTTPError {e.code} al pedir {url}: {e.reason}")
-        sys.exit(1)
+        if fatal:
+            sys.exit(1)
+        return None
     except URLError as e:
         print(f"  ❌ URLError al pedir {url}: {e.reason}")
-        sys.exit(1)
+        if fatal:
+            sys.exit(1)
+        return None
     except Exception as e:
         print(f"  ❌ Excepción inesperada al pedir {url}: {e}")
-        sys.exit(1)
+        if fatal:
+            sys.exit(1)
+        return None
 
+def meta_content(html, prop):
+    """Devuelve el content de una etiqueta <meta property|name="prop" ...>,
+    soportando los dos órdenes de atributos (property antes o después de content)."""
+    p = re.escape(prop)
+    m = re.search(
+        r'<meta[^>]+(?:property|name)=["\']' + p + r'["\'][^>]*content=["\']([^"\']*)["\']',
+        html, re.IGNORECASE)
+    if m:
+        return unescape(m.group(1).strip())
+    m = re.search(
+        r'<meta[^>]+content=["\']([^"\']*)["\'][^>]*(?:property|name)=["\']' + p + r'["\']',
+        html, re.IGNORECASE)
+    if m:
+        return unescape(m.group(1).strip())
+    return ''
+
+# ── Parseo del listado ──────────────────────────────────────────────────────────
 def parse_tribuna_articles(html):
-    """Extracts articles from Tribuna de Andalucía HTML.
-    Works with pages that use <h2 class='entry-title'> structure (no <article> tags).
+    """Extrae (url, titulo) del listado de autor de Tribuna.
+    Usa la estructura <h2 class='entry-title'><a href=...>...</a></h2>.
     """
     articles = []
-
-    # Match h2.entry-title links — this is the structure on nueva-economia pages
+    seen = set()
     title_pattern = re.compile(
         r'<h2[^>]*class="[^"]*entry-title[^"]*"[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
         re.DOTALL | re.IGNORECASE
     )
-    date_pattern = re.compile(
-        r'<time[^>]*datetime="([^"]*)"[^>]*>([^<]*)</time>',
-        re.IGNORECASE
-    )
-
     for m in title_pattern.finditer(html):
         url = m.group(1).strip()
-        title = re.sub(r'<[^>]+>', '', m.group(2)).strip()
-        title = unescape(title)
-
-        if not url or 'tribunadeandalucia.es' not in url:
+        title = unescape(re.sub(r'<[^>]+>', '', m.group(2)).strip())
+        if not url or 'tribunadeandalucia.es' not in url or url in seen:
             continue
-
-        # Search for date in surrounding context
-        start = max(0, m.start() - 1500)
-        end = min(len(html), m.end() + 1500)
-        context = html[start:end]
-
-        fecha = ''
-        fecha_iso = ''
-        date_match = date_pattern.search(context)
-        if date_match:
-            fecha_iso = date_match.group(1)[:10]
-            date_text = date_match.group(2).lower().strip()
-            parts = date_text.replace(' de ', ' ').split()
-            for i, part in enumerate(parts):
-                if part in MESES and i + 1 < len(parts):
-                    year = parts[i + 1] if parts[i + 1].isdigit() else ''
-                    fecha = f"{MESES[part]} {year}".strip()
-                    break
-            if not fecha and fecha_iso:
-                try:
-                    dt = datetime.strptime(fecha_iso, '%Y-%m-%d')
-                    meses_num = ['Ene','Feb','Mar','Abr','May','Jun',
-                                 'Jul','Ago','Sep','Oct','Nov','Dic']
-                    fecha = f"{meses_num[dt.month-1]} {dt.year}"
-                except Exception:
-                    pass
-
-        if title and url:
-            articles.append({
-                'url': url,
-                'title': title,
-                'date': fecha,
-                'date_iso': fecha_iso,
-                'excerpt': title,
-            })
-
+        seen.add(url)
+        articles.append({'url': url, 'title': title})
     return articles
 
+# ── Enriquecer cada artículo nuevo con datos de su propia página ─────────────────
+def enrich_article(article):
+    """Visita la página del artículo y rellena fecha, imagen y resumen."""
+    article.setdefault('date_iso', '')
+    article.setdefault('date', '')
+    article.setdefault('image', DEFAULT_IMG)
+    article.setdefault('excerpt', article['title'])
+
+    html = fetch_url(article['url'], fatal=False)
+    if not html:
+        print(f"  ⚠️  No se pudo abrir {article['url']}, uso valores por defecto.")
+        return article
+
+    pub = meta_content(html, 'article:published_time')   # 2026-05-20T14:58:38+02:00
+    if pub:
+        article['date_iso'] = pub[:10]
+        try:
+            d = datetime.strptime(article['date_iso'], '%Y-%m-%d')
+            article['date'] = f"{MESES_NUM[d.month-1]} {d.year}"
+        except Exception:
+            pass
+
+    img = meta_content(html, 'og:image')
+    if img:
+        article['image'] = img
+
+    desc = meta_content(html, 'og:description') or meta_content(html, 'description')
+    if desc:
+        article['excerpt'] = desc
+
+    return article
+
+# ── Manejo del array DIARIO en el HTML ───────────────────────────────────────────
 def extract_diario_array(html):
-    """Extracts the DIARIO JS array from the HTML."""
     match = re.search(r'var DIARIO=(\[.*?\]);', html, re.DOTALL)
     if not match:
         raise ValueError("No se encontró el array DIARIO en el HTML")
     raw = match.group(1)
-    # Convertir claves JS sin comillas a JSON estricto: {t:"x"} -> {"t":"x"}
-    raw = re.sub(r'(?<=[{,])(\w+)(?=:)', r'"\1"', raw)
+    raw = re.sub(r'(?<=[{,])(\w+)(?=:)', r'"\1"', raw)  # claves JS -> JSON
     return json.loads(raw)
 
 def build_diario_array(html, items):
-    """Replaces the DIARIO array in the HTML."""
     json_str = json.dumps(items, ensure_ascii=False, separators=(',', ':'))
     return re.sub(r'var DIARIO=\[.*?\];', f'var DIARIO={json_str};', html, flags=re.DOTALL)
 
 def article_to_diario_item(article):
-    """Converts a scraped article to DIARIO array format."""
-    dt = article.get('date', '')
     return {
-        't': article['title'],
-        'd': article.get('date_iso', '') or datetime.now().strftime('%Y-%m-%d'),
-        'dt': dt,
-        'i': 'https://www.tribunadeandalucia.es/wp-content/uploads/2025/07/WhatsApp-Image-2025-07-07-at-17.16.00-e1755524947319.jpg',
-        'u': article['url'],
-        'e': article.get('excerpt', article['title'])
+        't':  article['title'],
+        'd':  article.get('date_iso', '') or datetime.now().strftime('%Y-%m-%d'),
+        'dt': article.get('date', ''),
+        'i':  article.get('image', DEFAULT_IMG),
+        'u':  article['url'],
+        'e':  article.get('excerpt', article['title']),
     }
 
 def sort_key(item):
     d = item.get('d', '')
     return d if d else '0000-00-00'
 
+# ── Main ────────────────────────────────────────────────────────────────────────
 def main():
     print("=== Actualización Diario del CEO — Tribuna de Andalucía ===")
     print(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
-    # Read current HTML
     with open(HTML_PATH, 'r', encoding='utf-8') as f:
         html = f.read()
 
@@ -173,31 +183,25 @@ def main():
     current_urls = {item['u'] for item in current_diario}
     print(f"Artículos actuales en Diario del CEO: {len(current_diario)}")
 
-    # Scrape articles
-    new_articles = []
-    found_total = 0
-    for url in [AUTHOR_URL, SEARCH_URL]:
-        print(f"Scrapeando: {url}")
-        page_html = fetch_url(url)   # fetch_url ahora aborta en rojo si falla
-        found = parse_tribuna_articles(page_html)
-        found_total += len(found)
-        print(f"  Artículos encontrados: {len(found)}")
-        for a in found:
-            if a['url'] not in current_urls and a['url'] not in [x['url'] for x in new_articles]:
-                new_articles.append(a)
-        break  # Only need one URL since both are the same
+    print(f"Scrapeando: {AUTHOR_URL}")
+    page_html = fetch_url(AUTHOR_URL)            # fatal=True: aborta en rojo si falla
+    found = parse_tribuna_articles(page_html)
+    print(f"  Artículos encontrados en el listado: {len(found)}")
 
-    # Si el parser no encuentra NINGÚN artículo en una página que sí existe,
-    # casi seguro es que el HTML cambió o nos están bloqueando. Fallar ruidosamente.
-    if found_total == 0:
-        print("❌ El parser no encontró ningún artículo. La página puede haber cambiado o estar bloqueada.")
+    if len(found) == 0:
+        print("❌ El parser no encontró ningún artículo. La página pudo cambiar o estar bloqueada.")
         sys.exit(1)
+
+    new_articles = [a for a in found if a['url'] not in current_urls]
 
     if not new_articles:
         print("No hay columnas nuevas. No se realizan cambios.")
         sys.exit(0)
 
     print(f"Columnas nuevas encontradas: {len(new_articles)}")
+    for a in new_articles:
+        enrich_article(a)
+        print(f"  + [{a.get('date') or '¿sin fecha?'}] {a['title']}")
 
     new_items = [article_to_diario_item(a) for a in new_articles]
     updated_diario = new_items + current_diario
@@ -206,13 +210,10 @@ def main():
     print(f"Total artículos tras actualización: {len(updated_diario)}")
 
     updated_html = build_diario_array(html, updated_diario)
-
     with open(HTML_PATH, 'w', encoding='utf-8') as f:
         f.write(updated_html)
 
     print(f"✅ index.html actualizado con {len(new_items)} columna(s) nueva(s).")
-    for a in new_articles:
-        print(f"  + {a['date']} — {a['title']}")
 
 if __name__ == '__main__':
     main()
